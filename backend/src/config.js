@@ -2,12 +2,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 // Collect all provided Gemini API keys for rotation & fallback
-const keys = [
-  process.env.GEMINI_API_KEY_1,
-  process.env.GEMINI_API_KEY_2,
-  process.env.GEMINI_API_KEY_3,
-  process.env.GEMINI_API_KEY,
-]
+const keys = Object.keys(process.env)
+  .filter((k) => k.startsWith("GEMINI_API_KEY"))
+  .sort()
+  .map((k) => process.env[k])
   .filter(Boolean)
   .map((k) => k.trim())
   .filter((v, i, a) => a.indexOf(v) === i); // remove duplicates
@@ -15,7 +13,7 @@ const keys = [
 const config = {
   geminiApiKeys: keys,
   geminiApiKey: keys[0] || "",
-  mongoUri: process.env.MONGODB_URI || "mongodb://localhost:27017/lucent_resumer_screener",
+  mongoUri: process.env.MONGODB_URI || process.env.MONGO_URI || "mongodb://localhost:27017/placement_referee",
   port: parseInt(process.env.PORT) || 5000,
   allowedOrigins: (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(","),
   maxFileSizeMb: parseInt(process.env.MAX_FILE_SIZE_MB) || 10,
