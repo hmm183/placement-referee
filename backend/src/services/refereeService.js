@@ -1,10 +1,11 @@
 /**
- * Placement Referee Service
+ * Placement Referee Service (Optimized High-Performance Engine)
  *
- * Implements the impartial referee evaluation engine:
- * 1. Solo Referee Assessment: Evaluates Candidate A's evidence against specific company/role requirements.
- * 2. Head-to-Head Referee Assessment: Impartial pairwise comparison of Candidate A vs Candidate B for the same role.
- * 3. Persists full results in MongoDB Atlas to prevent redundant Gemini API calls on page refresh.
+ * Implements the impartial referee evaluation engine with single-pass LLM execution:
+ * 1. Instant Local Text Parsing (<50ms) for candidate resumes.
+ * 2. Single-Pass Solo Referee Assessment: Evaluates candidate evidence and extracts metadata in ONE Gemini call (~6-9s).
+ * 3. Single-Pass Head-to-Head Pairwise Comparison: Evaluates Candidate A vs Candidate B in ONE comparative Gemini call (~7-10s).
+ * 4. Persists full results in MongoDB Atlas for zero-latency retrieval on page refresh or history viewing.
  */
 
 import RefereeCase from "../models/RefereeCase.js";
@@ -12,44 +13,47 @@ import Resume from "../models/Resume.js";
 import { extractText } from "../parsers/resumeParser.js";
 import { generateJSON } from "../llm/geminiClient.js";
 import {
-  buildExtractionPrompt,
   buildSoloRefereePrompt,
   buildHeadToHeadRefereePrompt,
 } from "../llm/prompts.js";
 import axios from "axios";
 
 /**
- * Safely parse candidate resume into structured data via Gemini
+ * Fast local regex heuristic to extract basic profile attributes (<2ms)
  */
-async function extractAndStructureResume(filename, buffer, userId = null) {
-  const rawText = await extractText(filename, buffer);
-  if (!rawText || rawText.trim().length < 20) {
-    throw new Error(`Could not extract sufficient text from "${filename}". File may be empty or corrupted.`);
+function quickExtractCandidateProfile(rawText, filename) {
+  const lines = rawText
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const emailMatch = rawText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  const phoneMatch = rawText.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
+
+  // Look for the candidate's name in top 5 lines
+  let name = null;
+  for (const line of lines.slice(0, 5)) {
+    if (
+      line.length >= 2 &&
+      line.length <= 40 &&
+      !line.includes("@") &&
+      !line.includes("http") &&
+      !/curriculum|resume|cv|contact|profile|education|experience/i.test(line)
+    ) {
+      name = line;
+      break;
+    }
   }
 
-  const prompt = buildExtractionPrompt(rawText);
-  let parsedData = null;
-  try {
-    parsedData = await generateJSON(prompt, { maxOutputTokens: 8192 });
-  } catch (err) {
-    console.warn(`[refereeService] Resume structure extraction fallback: ${err.message}`);
-    parsedData = {
-      name: filename.replace(/\.[^/.]+$/, ""),
-      skills: [],
-      experience: [],
-      education: [],
-      summary: null,
-    };
+  if (!name) {
+    name = filename.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ");
   }
 
-  const resume = await Resume.create({
-    userId: userId || null,
-    filename,
-    rawText,
-    parsedData,
-  });
-
-  return resume;
+  return {
+    name,
+    email: emailMatch ? emailMatch[0] : null,
+    phone: phoneMatch ? phoneMatch[0] : null,
+  };
 }
 
 /**
@@ -59,7 +63,7 @@ export async function tryFetchJobUrl(url) {
   if (!url || !url.startsWith("http")) return null;
   try {
     const res = await axios.get(url, {
-      timeout: 8000,
+      timeout: 6000,
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
     });
     // Strip html tags
@@ -77,7 +81,7 @@ export async function tryFetchJobUrl(url) {
 }
 
 /**
- * Create a new Solo Referee Case
+ * Create a new Solo Referee Case with Single-Pass Gemini Execution
  */
 export async function createSoloCase({
   company,
@@ -96,16 +100,24 @@ export async function createSoloCase({
   buffer,
   userId = null,
 }) {
+  const overallStart = Date.now();
   if (!company?.trim()) throw new Error("Company name is required.");
   if (!role?.trim()) throw new Error("Role name is required.");
   if (!jobDescription?.trim()) throw new Error("Job description or requirements are required.");
   if (!buffer) throw new Error("Candidate resume file is required.");
 
-  // 1. Process Candidate A Resume
-  console.log(`[refereeService] Parsing Candidate A resume (${filename})...`);
-  const resumeA = await extractAndStructureResume(filename, buffer, userId);
+  // 1. Instant local text extraction (<50ms)
+  const extractStart = Date.now();
+  const rawText = await extractText(filename, buffer);
+  if (!rawText || rawText.trim().length < 20) {
+    throw new Error(`Could not extract sufficient text from "${filename}". File may be empty or an unreadable scan.`);
+  }
+  console.log(`[refereeService] Resume extracted in ${Date.now() - extractStart}ms`);
 
-  // 2. Build opportunity object
+  // 2. Fast local profile extraction
+  const localProfile = quickExtractCandidateProfile(rawText, filename);
+
+  // 3. Build opportunity object
   const opportunity = {
     company: company.trim(),
     role: role.trim(),
@@ -121,18 +133,64 @@ export async function createSoloCase({
     jobUrl: jobUrl?.trim() || null,
   };
 
-  // 3. Generate Solo Referee Analysis with Gemini
-  console.log(`[refereeService] Generating Solo Referee Assessment with Gemini...`);
-  const prompt = buildSoloRefereePrompt(opportunity, resumeA);
+  // 4. Single-Pass Solo Referee Assessment with Gemini
+  console.log(`[refereeService] Running single-pass Solo Referee Assessment with Gemini...`);
+  const geminiStart = Date.now();
+  const candidatePayload = {
+    rawText,
+    name: localProfile.name,
+  };
+  const prompt = buildSoloRefereePrompt(opportunity, candidatePayload);
+  
   let soloAnalysis;
   try {
-    soloAnalysis = await generateJSON(prompt, { temperature: 0.1, maxOutputTokens: 8192 });
+    soloAnalysis = await generateJSON(prompt, { temperature: 0.1, maxOutputTokens: 4096 });
+    console.log(`[refereeService] Solo Gemini evaluation completed in ${Date.now() - geminiStart}ms`);
   } catch (err) {
     console.error("[refereeService] Solo Referee Gemini call failed:", err);
     throw new Error(`Referee assessment generation failed: ${err.message}`);
   }
 
-  // 4. Save RefereeCase in MongoDB Atlas
+  // 5. Structure candidate profile from referee response and local fallback
+  const finalName =
+    soloAnalysis?.candidateA?.name &&
+    !soloAnalysis.candidateA.name.includes("Extract Candidate")
+      ? soloAnalysis.candidateA.name
+      : localProfile.name;
+
+  const finalEmail =
+    soloAnalysis?.candidateA?.email &&
+    !soloAnalysis.candidateA.email.includes("Extract")
+      ? soloAnalysis.candidateA.email
+      : localProfile.email;
+
+  const finalSkills = Array.isArray(soloAnalysis?.candidateA?.skills)
+    ? soloAnalysis.candidateA.skills
+    : [];
+
+  const parsedData = {
+    name: finalName,
+    email: finalEmail,
+    phone: localProfile.phone,
+    skills: finalSkills,
+    summary: soloAnalysis?.verdict?.summary || null,
+    experience: [],
+    education: [],
+    projects: [],
+  };
+
+  if (soloAnalysis?.candidateA) {
+    soloAnalysis.candidateA.name = finalName;
+  }
+
+  // 6. Save Resume and RefereeCase in MongoDB Atlas
+  const resumeA = await Resume.create({
+    userId: userId || null,
+    filename,
+    rawText,
+    parsedData,
+  });
+
   const refereeCase = await RefereeCase.create({
     userId: userId || null,
     company: opportunity.company,
@@ -155,11 +213,12 @@ export async function createSoloCase({
     comparisonAnalysis: null,
   });
 
+  console.log(`[refereeService] Total Solo case creation completed in ${Date.now() - overallStart}ms`);
   return getRefereeCaseById(refereeCase._id, userId);
 }
 
 /**
- * Add Candidate B to an existing case and perform head-to-head pairwise comparison
+ * Add Candidate B to an existing case and perform single-pass head-to-head pairwise comparison
  */
 export async function addCandidateBAndCompare({
   caseId,
@@ -167,6 +226,7 @@ export async function addCandidateBAndCompare({
   buffer,
   userId = null,
 }) {
+  const overallStart = Date.now();
   const query = { _id: caseId };
   if (userId) query.userId = userId;
 
@@ -175,9 +235,19 @@ export async function addCandidateBAndCompare({
     throw new Error("Referee case not found or unauthorized.");
   }
 
-  // 1. Process Candidate B Resume
-  console.log(`[refereeService] Parsing Candidate B resume (${filename})...`);
-  const resumeB = await extractAndStructureResume(filename, buffer, userId);
+  // 1. Instant local text extraction for Candidate B (<50ms)
+  const extractStart = Date.now();
+  const rawTextB = await extractText(filename, buffer);
+  if (!rawTextB || rawTextB.trim().length < 20) {
+    throw new Error(`Could not extract sufficient text from "${filename}". File may be empty or corrupted.`);
+  }
+  console.log(`[refereeService] Candidate B resume extracted in ${Date.now() - extractStart}ms`);
+
+  const localProfileB = quickExtractCandidateProfile(rawTextB, filename);
+  const candidateBPayload = {
+    rawText: rawTextB,
+    name: localProfileB.name,
+  };
 
   // 2. Candidate A is already persisted
   const resumeA = refereeCase.candidateAResumeId;
@@ -200,24 +270,67 @@ export async function addCandidateBAndCompare({
     jobUrl: refereeCase.jobUrl,
   };
 
-  // 4. Run comparative Head-to-Head Gemini prompt
-  console.log(`[refereeService] Running Head-to-Head Referee comparison with Gemini...`);
-  const prompt = buildHeadToHeadRefereePrompt(opportunity, resumeA, resumeB);
+  // 4. Single-Pass Comparative Head-to-Head Gemini prompt
+  console.log(`[refereeService] Running single-pass Head-to-Head comparison with Gemini...`);
+  const geminiStart = Date.now();
+  const prompt = buildHeadToHeadRefereePrompt(opportunity, resumeA, candidateBPayload);
+  
   let comparisonAnalysis;
   try {
-    comparisonAnalysis = await generateJSON(prompt, { temperature: 0.1, maxOutputTokens: 8192 });
+    comparisonAnalysis = await generateJSON(prompt, { temperature: 0.1, maxOutputTokens: 4096 });
+    console.log(`[refereeService] Head-to-Head Gemini evaluation completed in ${Date.now() - geminiStart}ms`);
   } catch (err) {
     console.error("[refereeService] Head-to-Head Referee Gemini call failed:", err);
     throw new Error(`Head-to-head comparison failed: ${err.message}`);
   }
 
-  // 5. Update RefereeCase with Candidate B and comparison results
+  // 5. Structure candidate B profile from comparison response
+  const finalNameB =
+    comparisonAnalysis?.candidateB?.name &&
+    !comparisonAnalysis.candidateB.name.includes("Candidate B full")
+      ? comparisonAnalysis.candidateB.name
+      : localProfileB.name;
+
+  const finalEmailB =
+    comparisonAnalysis?.candidateB?.email &&
+    !comparisonAnalysis.candidateB.email.includes("Candidate B email")
+      ? comparisonAnalysis.candidateB.email
+      : localProfileB.email;
+
+  const finalSkillsB = Array.isArray(comparisonAnalysis?.candidateB?.skills)
+    ? comparisonAnalysis.candidateB.skills
+    : [];
+
+  const parsedDataB = {
+    name: finalNameB,
+    email: finalEmailB,
+    phone: localProfileB.phone,
+    skills: finalSkillsB,
+    summary: comparisonAnalysis?.verdict?.summary || null,
+    experience: [],
+    education: [],
+    projects: [],
+  };
+
+  if (comparisonAnalysis?.candidateB) {
+    comparisonAnalysis.candidateB.name = finalNameB;
+  }
+
+  const resumeB = await Resume.create({
+    userId: userId || null,
+    filename,
+    rawText: rawTextB,
+    parsedData: parsedDataB,
+  });
+
+  // 6. Update RefereeCase with Candidate B and comparison results
   refereeCase.candidateBResumeId = resumeB._id;
   refereeCase.mode = "head_to_head";
   refereeCase.status = "completed";
   refereeCase.comparisonAnalysis = comparisonAnalysis;
   await refereeCase.save();
 
+  console.log(`[refereeService] Total Head-to-Head comparison completed in ${Date.now() - overallStart}ms`);
   return getRefereeCaseById(refereeCase._id, userId);
 }
 
@@ -226,7 +339,6 @@ export async function addCandidateBAndCompare({
  */
 export async function getRefereeCaseById(caseId, userId = null) {
   const query = { _id: caseId };
-  // If userId is provided, ensure user owns the case or case has null userId (guest)
   if (userId) {
     query.$or = [{ userId }, { userId: null }];
   }

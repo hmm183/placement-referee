@@ -183,6 +183,7 @@ ${JSON.stringify(parsedResumeJSON, null, 2)}
 /**
  * Solo Referee Prompt
  * Impartial evaluation of Candidate A's evidence against a specific role and company.
+ * Optimized for single-pass execution directly from extracted resume text.
  */
 export function buildSoloRefereePrompt(opportunity, candidateA) {
   const oppSummary = `
@@ -197,22 +198,31 @@ Job Requirements / Description:
 ${opportunity.jobDescription}
 `.trim();
 
+  const candidateText = (
+    candidateA.rawText ||
+    (typeof candidateA.parsedData === "object" ? JSON.stringify(candidateA.parsedData, null, 2) : "") ||
+    ""
+  ).slice(0, 7000);
+
+  const knownName = candidateA.parsedData?.name || candidateA.name || "";
+
   return `
 You are an impartial, analytical Placement Referee evaluating candidate evidence for a specific role at a specific company.
 Your mandate is to provide an objective, evidence-based assessment of how well the candidate's submitted resume demonstrates fit for THIS specific opportunity.
 
 CRITICAL OPERATIONAL DIRECTIVES:
-1. FOCUS ON EVIDENCE, NOT CONFIDENCE: Evaluate only what the candidate proves.
-2. DISTINGUISH EVIDENCE TYPES:
+1. SPEED & DENSITY: Be sharp, analytical, and concise. Avoid conversational fluff or filler. Use high-impact bullet points.
+2. FOCUS ON EVIDENCE, NOT CONFIDENCE: Evaluate only what the candidate proves.
+3. DISTINGUISH EVIDENCE TYPES:
    - "explicit": Directly demonstrated with concrete projects, jobs, metrics, or verifiable outputs.
    - "indirect": Related coursework or adjacent concepts mentioned without direct proof of application.
    - "none": No evidence was found in the submitted resume.
    Never equate "not mentioned" with "does not know". Always say "No evidence was found in the submitted resume."
-3. NO HALLUCINATION OF COMPANY SECRETS: If specific company internal rubrics are not publicly provided, state: "Company-specific hiring information was not available, so this assessment is primarily based on the role requirements provided."
-4. REDUCE STUDENT ANXIETY: Explicitly identify what actually matters versus what the student should NOT overthink (e.g. minor formatting nuances, keyword stuffing, minor tech mentions).
-5. HONESTY & ETHICS: Never advise fabricating skills or experience. State: "Only add if you genuinely have this experience."
-6. FAIRNESS: Never evaluate or infer protected attributes (race, gender, religion, caste, age, socioeconomic background). Evaluate evidence alone.
-7. ACKNOWLEDGE BLIND SPOTS: Explicitly note what the referee cannot observe (live coding performance, behavioral communication, problem-solving under time pressure).
+4. NO HALLUCINATION OF COMPANY SECRETS: If specific company internal rubrics are not publicly provided, state: "Company-specific hiring information was not available, so this assessment is primarily based on the role requirements provided."
+5. REDUCE STUDENT ANXIETY: Explicitly identify what actually matters versus what the student should NOT overthink (e.g. minor formatting nuances, keyword stuffing, minor tech mentions).
+6. HONESTY & ETHICS: Never advise fabricating skills or experience. State: "Only add if you genuinely have this experience."
+7. FAIRNESS: Never evaluate or infer protected attributes (race, gender, religion, caste, age, socioeconomic background). Evaluate evidence alone.
+8. ACKNOWLEDGE BLIND SPOTS: Explicitly note what the referee cannot observe (live coding performance, behavioral communication, problem-solving under time pressure).
 
 Return ONLY a valid JSON object matching this schema exactly (no markdown fences, no explanatory text):
 
@@ -231,7 +241,9 @@ Return ONLY a valid JSON object matching this schema exactly (no markdown fences
     "context": "${opportunity.context || "Campus placement"}"
   },
   "candidateA": {
-    "name": "${candidateA.parsedData?.name || "Candidate A"}",
+    "name": "${knownName ? knownName : "Extract Candidate Full Name from resume"}",
+    "email": "Extract candidate email from resume if present, or null",
+    "skills": ["Extracted", "top", "skills", "from", "resume"],
     "overallFit": "strong",
     "evidenceStrength": "high",
     "whatAlreadyProves": [
@@ -298,13 +310,14 @@ Opportunity Context:
 ${oppSummary}
 
 Candidate A Resume Evidence:
-${JSON.stringify(candidateA.parsedData || candidateA.rawText?.slice(0, 4000) || {}, null, 2)}
+${candidateText}
 `.trim();
 }
 
 /**
  * Head-to-Head Referee Prompt
  * Impartial pairwise comparison of Candidate A vs Candidate B for the exact same opportunity.
+ * Optimized for single-pass execution directly from extracted resume text.
  */
 export function buildHeadToHeadRefereePrompt(opportunity, candidateA, candidateB) {
   const oppSummary = `
@@ -319,32 +332,47 @@ Job Requirements / Description:
 ${opportunity.jobDescription}
 `.trim();
 
+  const textA = (
+    candidateA.rawText ||
+    (typeof candidateA.parsedData === "object" ? JSON.stringify(candidateA.parsedData, null, 2) : "") ||
+    ""
+  ).slice(0, 6500);
+
+  const textB = (
+    candidateB.rawText ||
+    (typeof candidateB.parsedData === "object" ? JSON.stringify(candidateB.parsedData, null, 2) : "") ||
+    ""
+  ).slice(0, 6500);
+
+  const nameA = candidateA.parsedData?.name || candidateA.name || "";
+  const nameB = candidateB.parsedData?.name || candidateB.name || "";
+
   return `
 You are an impartial, analytical Placement Referee conducting a rigorous pairwise comparison between two candidates (Candidate A and Candidate B) competing for the SAME opportunity at the SAME company.
 
 CRITICAL OPERATIONAL DIRECTIVES:
-1. COMPARE EVIDENCE, NOT CONFIDENCE:
+1. SPEED & DENSITY: Be sharp, analytical, and concise. Avoid conversational fluff or filler. Use high-impact bullet points.
+2. COMPARE EVIDENCE, NOT CONFIDENCE:
    - Base every verdict strictly on demonstrated evidence in the submitted resumes.
    - Do not reward buzzword repetition or resume length.
-2. DO NOT FORCE A WINNER:
+3. DO NOT FORCE A WINNER:
    - If both candidates demonstrate comparable evidence for the critical requirements, the verdict MUST be "tie" ("Too close to call").
    - A tie is a successful and honest outcome, not a failure.
    - Never use fake precision or arbitrary decimal scores (e.g. 87.4 vs 86.9).
    - If evidence is too sparse to judge, use "insufficient_evidence".
-3. NOT A HIRING PREDICTION:
-   - Never say: "Candidate A will be hired" or "Candidate B has an 85% chance".
+4. NOT A HIRING PREDICTION:
    - Say: "Candidate A currently has the stronger evidence of fit based on the submitted materials."
    - Explicitly remind that the company's final decision involves unobserved factors.
-4. EVIDENCE TYPES:
+5. EVIDENCE TYPES:
    - "explicit": Verifiable production, internship, or comprehensive project evidence.
    - "indirect": Related coursework or adjacent tools without direct demonstration.
    - "none": "No evidence was found in the submitted resume." (Never equate absence with lack of ability).
-5. WHAT ACTUALLY DECIDED IT:
-   - Surface 2 to 5 meaningful, decisive differences that truly matter for THIS role.
+6. WHAT ACTUALLY DECIDED IT:
+   - Surface 2 to 4 meaningful, decisive differences that truly matter for THIS role.
    - Separately list minor differences and irrelevant differences so students do not obsess over trivial details.
-6. WHAT NEITHER CANDIDATE SHOULD OVERTHINK:
+7. WHAT NEITHER CANDIDATE SHOULD OVERTHINK:
    - Provide concrete reassurance regarding superficial items (e.g. font, layout differences, duplicate keywords).
-7. ETHICS & FAIRNESS:
+8. ETHICS & FAIRNESS:
    - Strict neutrality. Never evaluate protected attributes or infer traits from names or backgrounds.
 
 Return ONLY a valid JSON object matching this schema exactly (no markdown fences, no explanatory text):
@@ -364,7 +392,9 @@ Return ONLY a valid JSON object matching this schema exactly (no markdown fences
     "context": "${opportunity.context || "Campus placement"}"
   },
   "candidateA": {
-    "name": "${candidateA.parsedData?.name || "Candidate A"}",
+    "name": "${nameA ? nameA : "Candidate A full name from resume"}",
+    "email": "Candidate A email if found, or null",
+    "skills": ["Candidate", "A", "key", "skills"],
     "overallFit": "strong",
     "evidenceStrength": "high",
     "keyEdgeAreas": ["Specific area where Candidate A demonstrated stronger evidence"],
@@ -379,7 +409,9 @@ Return ONLY a valid JSON object matching this schema exactly (no markdown fences
     ]
   },
   "candidateB": {
-    "name": "${candidateB.parsedData?.name || "Candidate B"}",
+    "name": "${nameB ? nameB : "Candidate B full name from resume"}",
+    "email": "Candidate B email if found, or null",
+    "skills": ["Candidate", "B", "key", "skills"],
     "overallFit": "good",
     "evidenceStrength": "medium",
     "keyEdgeAreas": ["Specific area where Candidate B demonstrated stronger evidence"],
@@ -473,10 +505,11 @@ Opportunity Context:
 ${oppSummary}
 
 Candidate A Resume Evidence:
-${JSON.stringify(candidateA.parsedData || candidateA.rawText?.slice(0, 4000) || {}, null, 2)}
+${textA}
 
 Candidate B Resume Evidence:
-${JSON.stringify(candidateB.parsedData || candidateB.rawText?.slice(0, 4000) || {}, null, 2)}
+${textB}
 `.trim();
 }
+
 

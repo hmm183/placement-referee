@@ -28,7 +28,7 @@ export default function RefereeProcessingScreen({ mode = "solo", company, role }
   useEffect(() => {
     const interval = setInterval(() => {
       setCurrentStageIdx((prev) => (prev < stages.length - 1 ? prev + 1 : prev));
-    }, 4500);
+    }, 1600);
     return () => clearInterval(interval);
   }, [stages.length]);
 
